@@ -2,4 +2,11 @@ streamlit
 ultralytics>=8.0.0
 opencv-python-headless
 numpy
+torch
+torchvision
+torchaudio
+pandas
+matplotlib
 lap
+filterpy
+scipy
