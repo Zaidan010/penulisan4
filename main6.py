@@ -7,11 +7,15 @@ from collections import defaultdict
 from ultralytics import YOLO
 from speed1 import SpeedEstimator
 
-# Konfigurasi tampilan Streamlit
+# =======================
+# Konfigurasi Streamlit
+# =======================
 st.set_page_config(page_title="YOLOv8 Speed & Counting", layout="wide")
-st.title("🚗 Perhitungan Estimasi kecepatan dan deteksi objek Kendaraan")
+st.title("🚗 Perhitungan Estimasi Kecepatan dan Deteksi Objek Kendaraan")
 
-# Inisialisasi state Streamlit
+# =======================
+# Inisialisasi state
+# =======================
 if "paused" not in st.session_state:
     st.session_state.paused = False
 if "frame_pos" not in st.session_state:
@@ -20,23 +24,28 @@ if "step" not in st.session_state:
     st.session_state.step = False
 if "last_frame" not in st.session_state:
     st.session_state.last_frame = None
+if "last_violation_id" not in st.session_state:  # untuk notifikasi sekali saja
+    st.session_state.last_violation_id = None
 
+# =======================
 # Upload video
+# =======================
 video_file = st.file_uploader("📁 Upload Video", type=["mp4", "avi"])
 
 if video_file:
+    # Simpan file sementara
     tfile = tempfile.NamedTemporaryFile(delete=False)
     tfile.write(video_file.read())
     cap = cv2.VideoCapture(tfile.name)
     fps = cap.get(cv2.CAP_PROP_FPS)
 
-    # Load YOLOv8 dan estimator
+    # Load YOLOv8 + SpeedEstimator
     model = YOLO("yolov8n.pt")  
     line_pts = [(0, 200), (1019, 200)]
     names = model.names
     speed_obj = SpeedEstimator(reg_pts=line_pts, names=names)
 
-    # Variabel tracking
+    # Variabel tracking & counting
     crossed_up, crossed_down = set(), set()
     count_up, count_down = 0, 0
     track_history = {}
@@ -50,7 +59,9 @@ if video_file:
     stframe = st.empty()
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
+    # =======================
     # Sidebar
+    # =======================
     with st.sidebar:
         st.header("📊 Statistik Kendaraan")
         up_count_display = st.empty()
@@ -69,12 +80,18 @@ if video_file:
         )
         cap.set(cv2.CAP_PROP_POS_FRAMES, st.session_state.frame_pos)
 
+    # =======================
+    # Fungsi bantu
+    # =======================
     def get_centroid(box):
         x1, y1, x2, y2 = box
         return int((x1 + x2) / 2), int((y1 + y2) / 2)
 
-    SPEED_LIMIT = 60
+    SPEED_LIMIT = 60  # km/h
 
+    # =======================
+    # Loop video
+    # =======================
     while cap.isOpened():
         if st.session_state.paused and not st.session_state.step:
             if st.session_state.last_frame is not None:
@@ -90,6 +107,7 @@ if video_file:
         st.session_state.frame_pos += 1
         frame = cv2.resize(frame, (640, 360))
 
+        # YOLOv8 tracking
         results = model.track(frame, persist=True, classes=[2, 3, 5, 7])
         if not results or results[0].boxes.id is None:
             st.session_state.last_frame = frame
@@ -101,9 +119,13 @@ if video_file:
         ids = results[0].boxes.id.int().cpu().numpy()
         frame = speed_obj.estimate_speed(frame, results)
 
+        # =======================
+        # Tracking & Counting
+        # =======================
         for box, obj_id, cls_id in zip(boxes, ids, clss):
             cx, cy = get_centroid(box)
 
+            # Hitung arah lintasan (naik/turun)
             if obj_id in track_history:
                 prev_cx, prev_cy = track_history[obj_id]
                 direction = cy - prev_cy
@@ -123,12 +145,14 @@ if video_file:
             track_history[obj_id] = (cx, cy)
             speed = speed_obj.spd.get(obj_id, 0)
 
+            # Simpan ke list speed sesuai arah
             if speed > 0:
                 if obj_id in crossed_up:
                     speeds_up.append(speed)
                 elif obj_id in crossed_down:
                     speeds_down.append(speed)
 
+            # Deteksi pelanggaran kecepatan
             if speed > SPEED_LIMIT and obj_id not in violated_ids:
                 violated_ids.add(obj_id)
                 second = st.session_state.frame_pos / fps
@@ -144,12 +168,16 @@ if video_file:
                     "time": round(second, 2)
                 })
 
+            # Visualisasi ID & posisi objek
             cv2.circle(frame, (cx, cy), 4, (0, 0, 255), -1)
             cv2.putText(frame, f'ID:{obj_id}', (cx, cy - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
+        # Update statistik sidebar
         up_count_display.metric("⬆️ Kendaraan Naik", count_up)
         down_count_display.metric("⬇️ Kendaraan Turun", count_down)
+
+        # Tampilkan frame
         cv2.putText(frame, f'⬆️ Up: {count_up}', (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
         cv2.putText(frame, f'⬇️ Down: {count_down}', (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         cv2.line(frame, line_pts[0], line_pts[1], (255, 0, 0), 2)
@@ -157,19 +185,29 @@ if video_file:
         st.session_state.last_frame = frame
         stframe.image(frame, channels="BGR", use_container_width=True)
 
-        # Tampilkan pelanggaran terbaru saat video berjalan
+        # =======================
+        # Notifikasi pelanggaran (sekali saja per ID)
+        # =======================
         if violations:
             last = violations[-1]
-            st.markdown("### ⚠️ Pelanggaran Kecepatan Terdeteksi")
-            st.warning(f"🚨 ID: {last['id']}, Class: {last['class']}, Speed: {last['speed']} km/h, "
-                       f"Direction: {last['direction']}, Time: {last['time']} detik")
+            if st.session_state.last_violation_id != last["id"]:
+                st.session_state.last_violation_id = last["id"]  # update id terakhir
+                st.markdown("### ⚠️ Pelanggaran Kecepatan Terdeteksi")
+                st.warning(
+                    f"🚨 ID: {last['id']}, Class: {last['class']}, Speed: {last['speed']} km/h, "
+                    f"Direction: {last['direction']}, Time: {last['time']} detik"
+                )
 
     cap.release()
 
+    # =======================
+    # Hasil Akhir
+    # =======================
     st.success("✅ Video processing complete.")
     st.markdown("### 🧾 Hasil Akhir")
     st.info(f"⬆️ **Total Kendaraan Naik:** {count_up}  \n⬇️ **Total Kendaraan Turun:** {count_down}")
 
+    # Rata-rata kecepatan
     st.markdown("### 📈 Rata-Rata Kecepatan Kendaraan")
     if speeds_up:
         avg_up = sum(speeds_up) / len(speeds_up)
@@ -183,14 +221,18 @@ if video_file:
     else:
         st.info("⬇️ Tidak ada kendaraan turun terdeteksi.")
 
+    # Rekap pelanggaran
     st.markdown("### 🚨 Rekap Pelanggaran Kecepatan")
     if violations:
         for v in violations:
-            st.warning(f"🚨 ID: {v['id']}, Class: {v['class']}, Speed: {v['speed']} km/h, "
-                       f"Direction: {v['direction']}, Time: {v['time']} detik")
+            st.warning(
+                f"🚨 ID: {v['id']}, Class: {v['class']}, Speed: {v['speed']} km/h, "
+                f"Direction: {v['direction']}, Time: {v['time']} detik"
+            )
     else:
         st.info("✅ Tidak ada pelanggaran kecepatan terdeteksi.")
 
+    # Detail klasifikasi
     st.markdown("### 📋 Detail Klasifikasi per Arah")
     def display_class_counts(class_counts, direction):
         st.subheader(f"{direction}")
